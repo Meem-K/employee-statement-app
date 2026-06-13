@@ -7,9 +7,8 @@ from reportlab.lib.pagesizes import legal, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 import os
+import re
 
 # Page configuration
 st.set_page_config(
@@ -24,50 +23,42 @@ st.markdown("Enter the EMIS code to generate the official employee statement")
 
 # Load data
 @st.cache_data
-def load_data():
+def load_data(uploaded_file=None):
     try:
-        df = pd.read_csv('employees.csv')
-        return df
-    except FileNotFoundError:
-        st.error("employees.csv file not found. Please upload it below.")
-        return None
+        if uploaded_file is not None:
+            # Read uploaded CSV
+            df = pd.read_csv(uploaded_file)
+            return df
+        elif os.path.exists('employees.csv'):
+            # Read local CSV
+            df = pd.read_csv('employees.csv')
+            return df
+        else:
+            return None
     except Exception as e:
         st.error(f"Error loading data: {e}")
         return None
 
-# File uploader for first-time setup
-df = load_data()
-if df is None:
-    uploaded_file = st.file_uploader("Upload employees.csv", type=['csv'])
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file)
-        st.success("Data loaded successfully!")
-        st.rerun()
-    st.stop()
+# File uploader for first-time setup or if file not found
+df = None
+uploaded_file = st.file_uploader("Upload Employee Data (CSV file)", type=['csv'], key="data_uploader")
+
+if uploaded_file is not None:
+    df = load_data(uploaded_file)
+    if df is not None:
+        st.success(f"✅ Loaded {len(df)} employee records!")
+else:
+    df = load_data()
+    if df is None:
+        st.info("📁 Please upload your employees.csv file to get started")
+        st.stop()
 
 # Clean column names (remove spaces, special chars)
 df.columns = df.columns.str.strip()
 
-# Column mapping (based on your Excel structure)
-COLUMN_MAP = {
-    'emis': 'EMIS Code',
-    'name': 'Name',
-    'father': 'Father/Husband Name',
-    'working_designation': 'Working Designation',
-    'bps': 'BPS',
-    'dob': 'Date of Birth',
-    'first_entry': 'Date of 1st Entry',
-    'current_posting': 'Current Posting Date',
-    'cnic': 'CNIC #',
-    'personnel': 'Personnel #',
-    'mobile': 'Mobile #',
-    'district': 'District',
-    'tehsil': 'Tehsil',
-    'school_name': 'Office/School'
-}
-
-# Find actual column names in the dataframe
+# Helper functions
 def find_column(df, possible_names):
+    """Find column by possible names (case-insensitive)"""
     for name in possible_names:
         for col in df.columns:
             if name.lower() in col.lower():
@@ -90,12 +81,16 @@ DISTRICT_COL = find_column(df, ['district'])
 TEHSIL_COL = find_column(df, ['tehsil'])
 SCHOOL_COL = find_column(df, ['office/school', 'school'])
 
+if not EMIS_COL:
+    st.error("Could not find EMIS column in the uploaded file")
+    st.stop()
+
 def extract_bps(value):
     """Extract numeric BPS from string like 'BPS-12' or '12'"""
     if pd.isna(value):
         return 0
     value_str = str(value)
-    numbers = ''.join([c for c in value_str if c.isdigit()])
+    numbers = re.sub(r'[^0-9]', '', value_str)
     return int(numbers) if numbers else 0
 
 def is_class_iv(designation, bps):
@@ -115,7 +110,9 @@ def format_date(date_val):
             # Try different formats
             for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%Y/%m/%d']:
                 try:
-                    d = datetime.strptime(date_val.split()[0], fmt)
+                    # Handle "2025-09-09 00:00:00" format
+                    clean_date = date_val.split()[0]
+                    d = datetime.strptime(clean_date, fmt)
                     return d.strftime('%d/%m/%Y')
                 except:
                     continue
@@ -146,8 +143,9 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
         'TitleStyle',
         parent=styles['Normal'],
         fontSize=10,
-        alignment=0,  # Left align
-        spaceAfter=6
+        alignment=0,
+        spaceAfter=6,
+        fontName='Helvetica'
     )
     
     header_style = ParagraphStyle(
@@ -162,7 +160,8 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
         'CellStyle',
         parent=styles['Normal'],
         fontSize=8,
-        alignment=0
+        alignment=0,
+        fontName='Helvetica'
     )
     
     # Build content
@@ -172,14 +171,14 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
     month_year = datetime.now().strftime('%B %Y')
     row1_text = f"Monthly Statement For The Month of: {month_year}  School Name: {school_name}  EMIS Code: {emis_code}"
     story.append(Paragraph(row1_text, title_style))
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 3))
     
     # Row 2: Location details
     row2_text = f"District: {district}    Tehsil: {tehsil}    Circle:     UC:     VC:"
     story.append(Paragraph(row2_text, title_style))
     story.append(Spacer(1, 6))
     
-    # Row 3: STAFF STATEMENT
+    # Row 3: STAFF STATEMENT header
     story.append(Paragraph("STAFF STATEMENT", header_style))
     story.append(Spacer(1, 6))
     
@@ -204,9 +203,9 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
     for idx, emp in enumerate(teaching, 1):
         teaching_data.append([
             str(idx),
-            Paragraph(emp['name'], cell_style),
-            Paragraph(emp['father'], cell_style),
-            f"{emp['designation']} (BPS-{emp['bps']})",
+            Paragraph(emp['name'][:50] if len(emp['name']) > 50 else emp['name'], cell_style),
+            Paragraph(emp['father'][:50] if len(emp['father']) > 50 else emp['father'], cell_style),
+            f"{emp['designation'][:40]} (BPS-{emp['bps']})" if len(emp['designation']) > 40 else f"{emp['designation']} (BPS-{emp['bps']})",
             emp['dob'],
             emp['first_entry'],
             emp['school_entry'],
@@ -221,13 +220,16 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
     for _ in range(2):
         teaching_data.append([
             '', '', '', '', '', '', '', '',
-            'Qualification Qualification',  # This text will be hidden (white on white)
+            'Qualification Qualification',
             '', '', ''
         ])
     
     # Create teaching table
     if len(teaching_data) > 1:
-        teaching_table = Table(teaching_data, repeatRows=1)
+        # Calculate column widths
+        col_widths = [0.5*inch, 1.5*inch, 1.5*inch, 1.8*inch, 0.8*inch, 0.9*inch, 0.9*inch, 0.9*inch, 1.2*inch, 1.0*inch, 0.8*inch, 0.8*inch]
+        
+        teaching_table = Table(teaching_data, colWidths=col_widths, repeatRows=1)
         teaching_table.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
             ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -239,7 +241,6 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
         ]))
         
         # Hide the "Qualification Qualification" text (make it white on white)
-        # Note: In reportlab, we set text color to white to hide it
         for row_idx in range(len(teaching_data) - 2, len(teaching_data)):
             teaching_table.setStyle(TableStyle([
                 ('TEXTCOLOR', (8, row_idx), (8, row_idx), colors.white),
@@ -259,9 +260,9 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
         for idx, emp in enumerate(class_iv, 1):
             class_iv_data.append([
                 str(idx),
-                Paragraph(emp['name'], cell_style),
-                Paragraph(emp['father'], cell_style),
-                f"{emp['designation']} (BPS-{emp['bps']})",
+                Paragraph(emp['name'][:50] if len(emp['name']) > 50 else emp['name'], cell_style),
+                Paragraph(emp['father'][:50] if len(emp['father']) > 50 else emp['father'], cell_style),
+                f"{emp['designation'][:40]} (BPS-{emp['bps']})" if len(emp['designation']) > 40 else f"{emp['designation']} (BPS-{emp['bps']})",
                 emp['dob'],
                 emp['first_entry'],
                 emp['school_entry'],
@@ -279,7 +280,9 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
             '', '', ''
         ])
         
-        class_iv_table = Table(class_iv_data, repeatRows=1)
+        col_widths = [0.5*inch, 1.5*inch, 1.5*inch, 1.8*inch, 0.8*inch, 0.9*inch, 0.9*inch, 0.9*inch, 1.2*inch, 1.0*inch, 0.8*inch, 0.8*inch]
+        
+        class_iv_table = Table(class_iv_data, colWidths=col_widths, repeatRows=1)
         class_iv_table.setStyle(TableStyle([
             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
             ('FONTSIZE', (0, 0), (-1, -1), 7),
@@ -299,7 +302,7 @@ def create_pdf(employees_data, school_name, district, tehsil, emis_code):
         story.append(class_iv_table)
         story.append(Spacer(1, 12))
     
-    # Add blank rows before submission date (2 rows, no borders)
+    # Add blank rows before submission date (2 rows, no borders - just spacers)
     for _ in range(2):
         story.append(Spacer(1, 12))
     
@@ -322,7 +325,8 @@ if submitted:
         st.error("Please enter an EMIS code")
     else:
         # Find matching employees
-        matching_employees = df[df[EMIS_COL].astype(str).str.strip() == emis_code.strip()]
+        emis_code_clean = emis_code.strip()
+        matching_employees = df[df[EMIS_COL].astype(str).str.strip() == emis_code_clean]
         
         if len(matching_employees) == 0:
             st.error(f"No employees found for EMIS code: {emis_code}")
@@ -333,40 +337,73 @@ if submitted:
                 district = matching_employees.iloc[0][DISTRICT_COL] if DISTRICT_COL else ""
                 tehsil = matching_employees.iloc[0][TEHSIL_COL] if TEHSIL_COL else ""
                 
+                # Handle NaN values
+                if pd.isna(school_name):
+                    school_name = "Unknown School"
+                if pd.isna(district):
+                    district = ""
+                if pd.isna(tehsil):
+                    tehsil = ""
+                
                 # Build employee data list
                 employees = []
                 for _, row in matching_employees.iterrows():
                     bps = extract_bps(row[BPS_COL]) if BPS_COL else 0
                     designation = row[DESIG_COL] if DESIG_COL else ""
                     
+                    # Handle NaN values
+                    name_val = row[NAME_COL] if NAME_COL else ""
+                    if pd.isna(name_val):
+                        name_val = ""
+                    
+                    father_val = row[FATHER_COL] if FATHER_COL else ""
+                    if pd.isna(father_val):
+                        father_val = ""
+                    
+                    designation_val = designation if not pd.isna(designation) else ""
+                    cnic_val = row[CNIC_COL] if CNIC_COL else ""
+                    if pd.isna(cnic_val):
+                        cnic_val = ""
+                    
+                    personnel_val = row[PERSONNEL_COL] if PERSONNEL_COL else ""
+                    if pd.isna(personnel_val):
+                        personnel_val = ""
+                    
+                    contact_val = row[MOBILE_COL] if MOBILE_COL else ""
+                    if pd.isna(contact_val):
+                        contact_val = ""
+                    
                     emp = {
-                        'name': str(row[NAME_COL]) if NAME_COL and not pd.isna(row[NAME_COL]) else "",
-                        'father': str(row[FATHER_COL]) if FATHER_COL and not pd.isna(row[FATHER_COL]) else "",
-                        'designation': str(designation),
+                        'name': str(name_val),
+                        'father': str(father_val),
+                        'designation': str(designation_val),
                         'bps': bps,
                         'dob': format_date(row[DOB_COL] if DOB_COL else None),
                         'first_entry': format_date(row[FIRST_ENTRY_COL] if FIRST_ENTRY_COL else None),
                         'school_entry': format_date(row[POSTING_COL] if POSTING_COL else None),
                         'post_entry': format_date(row[POSTING_COL] if POSTING_COL else None),
-                        'cnic': str(row[CNIC_COL]) if CNIC_COL and not pd.isna(row[CNIC_COL]) else "",
-                        'personnel': str(row[PERSONNEL_COL]) if PERSONNEL_COL and not pd.isna(row[PERSONNEL_COL]) else "",
-                        'contact': str(row[MOBILE_COL]) if MOBILE_COL and not pd.isna(row[MOBILE_COL]) else "",
-                        'is_class_iv': is_class_iv(designation, bps)
+                        'cnic': str(cnic_val),
+                        'personnel': str(personnel_val),
+                        'contact': str(contact_val),
+                        'is_class_iv': is_class_iv(designation_val, bps)
                     }
                     employees.append(emp)
                 
                 # Generate PDF
-                pdf_buffer = create_pdf(employees, school_name, district, tehsil, emis_code)
-                
-                # Provide download button
-                st.success(f"✅ Found {len(employees)} employee(s)")
-                st.download_button(
-                    label="📥 Download Statement (PDF)",
-                    data=pdf_buffer,
-                    file_name=f"Official_Statement_EMIS_{emis_code}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                try:
+                    pdf_buffer = create_pdf(employees, str(school_name), str(district), str(tehsil), emis_code_clean)
+                    
+                    # Provide download button
+                    st.success(f"✅ Found {len(employees)} employee(s)")
+                    st.download_button(
+                        label="📥 Download Statement (PDF)",
+                        data=pdf_buffer,
+                        file_name=f"Official_Statement_EMIS_{emis_code_clean}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                except Exception as pdf_error:
+                    st.error(f"Error generating PDF: {str(pdf_error)}")
 
 # Footer
 st.markdown("---")
